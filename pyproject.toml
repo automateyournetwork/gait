@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling>=1.21.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gait"
+version = "0.0.1"
+description = "GAIT: git-like versioning for AI turns, commits, and context"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GNU General Public License v3.0" }
+authors = [{ name = "John Capobianco" }]
+dependencies = []
+
+[project.scripts]
+gait = "gait.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gait"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
