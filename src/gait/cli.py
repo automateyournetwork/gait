@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import os
-import sys
 import argparse
 import json
-import urllib.request
-import urllib.error
+import socket
 
 from pathlib import Path
 
@@ -14,68 +12,17 @@ from .schema import Turn
 from .objects import short_oid
 from .log import walk_commits
 from .tokens import count_turn_tokens
-from .remote import RemoteSpec, remote_add, remote_get, push as remote_push, fetch as remote_fetch, pull as remote_pull, clone_into
-
-# ----------------------------
-### Ollama API Helpers 
-# ---------------------------
-
-def _ollama_url(host: str, path: str) -> str:
-    host = host.rstrip("/")
-    if not host.startswith("http://") and not host.startswith("https://"):
-        host = "http://" + host
-    return host + path
-
-
-def _ollama_json(host: str, path: str, payload: dict | None = None, timeout: float = 60.0) -> dict:
-    url = _ollama_url(host, path)
-    data = None if payload is None else json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST" if payload is not None else "GET",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-            return json.loads(raw) if raw.strip() else {}
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Ollama HTTP {e.code} {e.reason}: {body}") from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Cannot reach Ollama at {url}: {e}") from e
-
-
-def ollama_list_models(host: str) -> list[str]:
-    r = _ollama_json(host, "/api/tags")
-    models = []
-    for m in (r.get("models") or []):
-        name = m.get("name")
-        if name:
-            models.append(name)
-    return models
-
-
-def ollama_chat(
-    host: str,
-    model: str,
-    messages: list[dict],
-    *,
-    temperature: float | None = None,
-    num_predict: int = 200,
-) -> str:
-    payload: dict = {
-        "model": model,
-        "messages": messages,
-        "stream": False,
-        "options": {"num_predict": num_predict},
-    }
-    if temperature is not None:
-        payload["options"]["temperature"] = temperature
-
-    r = _ollama_json(host, "/api/chat", payload=payload, timeout=600.0)
-    return ((r.get("message") or {}).get("content")) or ""
+from .remote import (
+    RemoteSpec,
+    remote_add, remote_get, remote_list,
+    push as remote_push, fetch as remote_fetch, pull as remote_pull,
+    clone_into,
+)
+from .verify import verify_repo
+from .llm import (
+    ollama_list_models, ollama_chat,
+    openai_compat_list_models, openai_compat_chat,
+)
 
 def _resolve_commitish(repo: GaitRepo, commitish: str | None) -> str:
     """
@@ -101,13 +48,11 @@ def _require_gaithub_token() -> str:
         raise RuntimeError("Missing GAITHUB_TOKEN env var (PAT-style token for gaithubd).")
     return tok
 
-
 def cmd_remote_add(args: argparse.Namespace) -> int:
     repo = GaitRepo.discover()
     remote_add(repo, args.name, args.url)
     print(f"remote {args.name} -> {args.url}")
     return 0
-
 
 def cmd_push(args: argparse.Namespace) -> int:
     repo = GaitRepo.discover()
@@ -119,7 +64,6 @@ def cmd_push(args: argparse.Namespace) -> int:
     print(f"pushed {args.branch or repo.current_branch()} to {args.remote} ({args.owner}/{args.repo})")
     return 0
 
-
 def cmd_fetch(args: argparse.Namespace) -> int:
     repo = GaitRepo.discover()
     token = _require_gaithub_token()
@@ -129,7 +73,6 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     heads, mems = remote_fetch(repo, spec, token=token)
     print(f"fetched: heads={len(heads)} memory={len(mems)}")
     return 0
-
 
 def cmd_pull(args: argparse.Namespace) -> int:
     repo = GaitRepo.discover()
@@ -149,7 +92,6 @@ def cmd_pull(args: argparse.Namespace) -> int:
         print(f"memory: {repo.read_memory_ref(repo.current_branch())}")
     return 0
 
-
 def cmd_clone(args: argparse.Namespace) -> int:
     token = _require_gaithub_token()
     dest = Path(args.path).resolve()
@@ -159,6 +101,30 @@ def cmd_clone(args: argparse.Namespace) -> int:
 
     print(f"cloned {args.owner}/{args.repo} into {dest}")
     return 0
+
+def cmd_remote_list(args: argparse.Namespace) -> int:
+    repo = GaitRepo.discover()
+    rems = remote_list(repo)
+    if not rems:
+        print("(no remotes configured)")
+        return 0
+    for name, url in rems.items():
+        if args.verbose:
+            print(f"{name}\t{url}")
+        else:
+            print(name)
+    return 0
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    repo = GaitRepo.discover()
+    r = verify_repo(repo)
+    if r["ok"]:
+        print("OK: repo verified")
+        return 0
+    print("FAILED: verify found problems")
+    for p in r["problems"]:
+        print(f"- {p}")
+    return 2
 
 # ----------------------------
 # Commands
@@ -415,47 +381,138 @@ def cmd_context(args: argparse.Namespace) -> int:
 def cmd_chat(args: argparse.Namespace) -> int:
     repo = GaitRepo.discover()
 
+    def port_open(host: str, port: int, timeout: float = 0.3) -> bool:
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except OSError:
+            return False
+
+    def auto_detect() -> dict | None:
+        # 1) Ollama
+        if port_open("127.0.0.1", 11434):
+            return {
+                "provider": "ollama",
+                "host": "127.0.0.1:11434",
+            }
+
+        # 2) Foundry Local
+        if port_open("127.0.0.1", 63545):
+            # Foundry does NOT accept the alias as model for /v1/chat/completions
+            # It wants the full Model ID. Default to env override if provided.
+            return {
+                "provider": "openai_compat",
+                "base_url": "http://127.0.0.1:63545",
+                "model": os.environ.get(
+                    "GAIT_FOUNDRY_MODEL",
+                    "DeepSeek-R1-Distill-Qwen-1.5B-trtrtx-gpu:1",
+                ),
+            }
+
+        # 3) LM Studio (later)
+        if port_open("127.0.0.1", 1234):
+            return {
+                "provider": "openai_compat",
+                "base_url": "http://127.0.0.1:1234",
+                # we don't know the model; user must set --model or GAIT_MODEL
+            }
+
+        return None
+
+    # ----------------------------
+    # Decide provider + endpoint
+    # ----------------------------
+    # Force openai_compat if base_url provided
+    if args.base_url and not args.provider:
+        args.provider = "openai_compat"
+
+    if not args.provider and not args.base_url:
+        d = auto_detect()
+        if not d:
+            raise RuntimeError(
+                "No local LLM found.\n"
+                "- Ollama: 127.0.0.1:11434\n"
+                "- Foundry Local: 127.0.0.1:63545\n"
+                "- LM Studio: 127.0.0.1:1234"
+            )
+        args.provider = d["provider"]
+        args.host = d.get("host", args.host)
+        args.base_url = d.get("base_url", args.base_url)
+        if not args.model:
+            args.model = d.get("model", "")
+
+    provider = args.provider or "ollama"
     host = args.host
-    model = args.model
+    base_url = args.base_url
+    api_key = args.api_key
+    model = args.model or os.environ.get("GAIT_MODEL", "").strip()
 
-    # If no model provided, pick the first available or fail nicely
-    if not model:
-        models = ollama_list_models(host)
-        if not models:
-            raise RuntimeError("No Ollama models found. Run `ollama pull llama3.1` (or similar) and try again.")
-        model = models[0]
-        print(f"[gait] no --model provided; using: {model}")
+    # ----------------------------
+    # Default model selection
+    # ----------------------------
+    if provider == "ollama":
+        if not model:
+            models = ollama_list_models(host)
+            if not models:
+                raise RuntimeError("No Ollama models found. Try: ollama pull llama3.1")
+            model = "llama3.1" if "llama3.1" in models else models[0]
+            print(f"[gait] no --model provided; using: {model}")
 
-    # Build a system message from GAIT memory (optional)
+    elif provider == "openai_compat":
+        if not base_url:
+            raise RuntimeError("openai_compat requires --base-url (or auto-detection).")
+
+        # Foundry: default model already set by auto_detect() (full ID), but still validate.
+        if not model:
+            raise RuntimeError(
+                "No model specified for openai_compat.\n"
+                "Foundry often returns empty /v1/models, so you must pass a model ID.\n"
+                "Example:\n"
+                "  gait chat --provider openai_compat --base-url http://127.0.0.1:63545 "
+                "--model DeepSeek-R1-Distill-Qwen-1.5B-trtrtx-gpu:1"
+            )
+
+        # IMPORTANT: If user gave the alias deepseek-r1-1.5b, Foundry will 400.
+        # We can auto-map just this one known alias as a convenience.
+        if base_url.startswith("http://127.0.0.1:63545") and model == "deepseek-r1-1.5b":
+            model = "DeepSeek-R1-Distill-Qwen-1.5B-trtrtx-gpu:1"
+
+    else:
+        raise RuntimeError(f"Unknown provider: {provider}")
+
+    where = host if provider == "ollama" else base_url
+    print(f"[gait] repo={repo.root} branch={repo.current_branch()} provider={provider} model={model} endpoint={where}")
+    print("[gait] enter your questions. Commands: /models /model NAME /pin /revert [/revert COMMIT] /memory /exit")
+    print()
+
+    # ----------------------------
+    # Build chat messages (memory + optional resume)
+    # ----------------------------
     messages: list[dict] = []
+
     if not args.no_memory:
         bundle = repo.build_context_bundle(full=False)
         if bundle.get("items"):
             lines = ["You are a helpful assistant. Use the following pinned context from GAIT memory if relevant:"]
             for it in bundle["items"]:
-                u = it.get("user_text", "").strip()
-                a = it.get("assistant_text", "").strip()
-                note = it.get("note", "").strip()
+                u = (it.get("user_text") or "").strip()
+                a = (it.get("assistant_text") or "").strip()
+                note = (it.get("note") or "").strip()
                 header = f"- PIN {it['index']}" + (f" ({note})" if note else "")
                 lines.append(header)
                 if u:
                     lines.append(f"  User: {u}")
                 if a:
                     lines.append(f"  Assistant: {a}")
-            system_text = "\n".join(lines)
-            messages.append({"role": "system", "content": system_text})
+            messages.append({"role": "system", "content": "\n".join(lines)})
 
     if args.system:
         messages.append({"role": "system", "content": args.system})
 
-    # ----------------------------
-    # Resume from HEAD history (replay last N turns)
-    # ----------------------------
     do_resume = (not args.no_resume) and (args.resume_turns > 0)
     if do_resume:
         start = _resolve_commitish(repo, args.resume_from)
         turns = repo.iter_turns_from_head(start_commit=start, limit_turns=args.resume_turns)
-
         for t in turns:
             u = (t.get("user") or {}).get("text", "")
             a = (t.get("assistant") or {}).get("text", "")
@@ -463,17 +520,12 @@ def cmd_chat(args: argparse.Namespace) -> int:
                 messages.append({"role": "user", "content": u})
             if a:
                 messages.append({"role": "assistant", "content": a})
-
         if turns:
             print(f"[gait] resumed {len(turns)} prior turn(s) from history")
-            last_u = ((turns[-1].get("user") or {}).get("text", "") or "").strip()
-            if last_u:
-                print(f"[gait] last user: {last_u[:80]}{'...' if len(last_u) > 80 else ''}")
 
-    print(f"[gait] repo={repo.root} branch={repo.current_branch()} model={model} host={host}")
-    print("[gait] enter your questions. Commands: /models /model NAME /pin /revert [/revert COMMIT] /memory /exit")
-    print()
-
+    # ----------------------------
+    # Interactive loop
+    # ----------------------------
     while True:
         try:
             user_text = input("you> ").strip()
@@ -484,18 +536,27 @@ def cmd_chat(args: argparse.Namespace) -> int:
         if not user_text:
             continue
 
-        # --- small text-menu commands ---
         if user_text in ("/exit", "/quit"):
             print("[gait] bye.")
             return 0
 
         if user_text == "/models":
-            ms = ollama_list_models(host)
-            if not ms:
-                print("[gait] no models found.")
+            if provider == "ollama":
+                ms = ollama_list_models(host)
+                if not ms:
+                    print("[gait] no models found.")
+                else:
+                    for m in ms:
+                        print(m)
             else:
-                for m in ms:
-                    print(m)
+                ms = openai_compat_list_models(base_url, api_key=api_key)
+                if not ms:
+                    print("[gait] (no models returned by /v1/models)")
+                    if base_url.startswith("http://127.0.0.1:63545"):
+                        print("[gait] Foundry tip: use `foundry service list` and pass the full Model ID via /model or --model.")
+                else:
+                    for m in ms:
+                        print(m)
             continue
 
         if user_text.startswith("/model "):
@@ -504,109 +565,49 @@ def cmd_chat(args: argparse.Namespace) -> int:
                 print("[gait] usage: /model <name>")
                 continue
             model = new_model
+            # small convenience mapping for Foundry alias
+            if base_url.startswith("http://127.0.0.1:63545") and model == "deepseek-r1-1.5b":
+                model = "DeepSeek-R1-Distill-Qwen-1.5B-trtrtx-gpu:1"
             print(f"[gait] model set to: {model}")
             continue
 
-        if user_text == "/memory":
-            bundle = repo.build_context_bundle(full=False)
-            print(json.dumps(bundle, ensure_ascii=False, indent=2))
-            continue
-
-        if user_text.startswith("/revert"):
-            parts = user_text.split()
-            commit = parts[1] if len(parts) > 1 else None
-
-            # reuse your revert behavior: default parent-of-HEAD
-            branch = repo.current_branch()
-            head = repo.head_commit_id()
-            if not head:
-                print("[gait] nothing to revert (empty branch)")
-                continue
-
-            if commit is None:
-                c = repo.get_commit(head)
-                parents = c.get("parents") or []
-                if not parents:
-                    repo.write_ref(branch, "")
-                    print(f"[gait] reverted: {branch} is now empty")
-                else:
-                    resolved = repo.reset_branch(parents[0])
-                    print(f"[gait] reverted: {branch} -> {resolved}")
-            else:
-                resolved = repo.reset_branch(commit)
-                print(f"[gait] reverted: {branch} -> {resolved}")
-
-            if args.also_memory:
-                old_mem = repo.read_memory_ref(branch)
-                new_mem = repo.reset_memory_to_commit(branch, repo.head_commit_id())
-                print(f"[gait] memory: {old_mem} -> {new_mem}")
-
-            continue
-
-        if user_text == "/pin":
-            # pin the last commit with turns (skip merges) — same logic as cmd_pin
-            head = repo.head_commit_id()
-            if not head:
-                print("[gait] no HEAD commit to pin.")
-                continue
-
-            cid = head
-            seen = set()
-            found = None
-            while cid and cid not in seen:
-                seen.add(cid)
-                c = repo.get_commit(cid)
-                if (c.get("turn_ids") or []):
-                    found = cid
-                    break
-                parents = c.get("parents") or []
-                cid = parents[0] if parents else ""
-
-            if not found:
-                print("[gait] no commit with turns found to pin.")
-                continue
-
-            mem_id = repo.pin_commit(found, note=args.pin_note or "")
-            print(f"[gait] pinned {found} into memory")
-            print(f"[gait] memory: {mem_id}")
-            continue
-
-        # --- normal chat turn ---
+        # normal chat
         messages.append({"role": "user", "content": user_text})
 
         try:
-            assistant_text = ollama_chat(
-                host,
-                model,
-                messages,
-                temperature=args.temperature,
-                num_predict=args.num_predict,
-            )
-
+            if provider == "ollama":
+                assistant_text = ollama_chat(
+                    host,
+                    model,
+                    messages,
+                    temperature=args.temperature,
+                    num_predict=args.num_predict,
+                )
+            else:
+                assistant_text = openai_compat_chat(
+                    base_url,
+                    model,
+                    messages,
+                    api_key=api_key,
+                    temperature=args.temperature,
+                    max_tokens=args.num_predict,
+                )
         except Exception as e:
-            print(f"[gait] ollama error: {e}")
-            # remove last user message so next try isn't polluted
+            print(f"[gait] llm error: {e}")
             messages.pop()
             continue
 
         print(f"ai> {assistant_text}\n")
         messages.append({"role": "assistant", "content": assistant_text})
 
-        # record to GAIT
-        tokens = count_turn_tokens(
-            user_text=user_text,
-            assistant_text=assistant_text,
-        )
+        tokens = count_turn_tokens(user_text=user_text, assistant_text=assistant_text)
 
         turn = Turn.v0(
             user_text=user_text,
             assistant_text=assistant_text,
-            context={"ollama_host": host},
+            context={"provider": provider, "endpoint": where},
             tools={},
-            model={
-                "provider": "ollama",
-                "model": model,
-            },
+            model={"provider": provider, "model": model},
             tokens=tokens,
             visibility="private",
         )
@@ -623,6 +624,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="gait")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    # ----------------------------
+    # Core repo commands
+    # ----------------------------
+
     s = sub.add_parser("init", help="Initialize a GAIT repo in PATH (default: .)")
     s.add_argument("path", nargs="?", default=".")
     s.set_defaults(func=cmd_init)
@@ -633,7 +638,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("branch", help="Create a branch")
     s.add_argument("name")
     s.add_argument("--from-commit", default=None)
-    s.add_argument("--no-inherit-memory", action="store_true", help="Do not inherit HEAD+ memory from current branch")
+    s.add_argument("--no-inherit-memory", action="store_true",
+                   help="Do not inherit HEAD+ memory from current branch")
     s.set_defaults(func=cmd_branch)
 
     s = sub.add_parser("checkout", help="Switch branches")
@@ -659,8 +665,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_show)
 
     s = sub.add_parser("pin", help="Pin a commit's turns into branch HEAD+ memory")
-    s.add_argument("commit", nargs="?", default=None, help="Commit id/prefix (required unless --last)")
-    s.add_argument("--last", action="store_true", help="Pin last commit with turns (skips merges)")
+    s.add_argument("commit", nargs="?", default=None,
+                   help="Commit id/prefix (required unless --last)")
+    s.add_argument("--last", action="store_true",
+                   help="Pin last commit with turns (skips merges)")
     s.add_argument("--note", default="", help="Optional note for why this was pinned")
     s.set_defaults(func=cmd_pin)
 
@@ -677,7 +685,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("merge", help="Merge SOURCE branch into the current branch (creates merge commit)")
     s.add_argument("source")
     s.add_argument("--message", default="")
-    s.add_argument("--with-memory", action="store_true", help="Also merge HEAD+ memory (pinned items)")
+    s.add_argument("--with-memory", action="store_true",
+                   help="Also merge HEAD+ memory (pinned items)")
     s.set_defaults(func=cmd_merge)
 
     s = sub.add_parser("context", help="Print the branch HEAD+ context pack (from pinned memory)")
@@ -686,41 +695,183 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_context)
 
     s = sub.add_parser("revert", help="Rewind current branch HEAD to a prior commit (default: parent of HEAD)")
-    s.add_argument("commit", nargs="?", default=None, help="Commit id/prefix (default: first parent of HEAD)")
-    s.add_argument("--also-memory", action="store_true", help="Also rewind HEAD+ memory via memory reflog")
+    s.add_argument("commit", nargs="?", default=None,
+                   help="Commit id/prefix (default: first parent of HEAD)")
+    s.add_argument("--also-memory", action="store_true",
+                   help="Also rewind HEAD+ memory via memory reflog")
     s.set_defaults(func=cmd_revert)
 
-    s = sub.add_parser("chat", help="Interactive local chat with Ollama (records every turn into GAIT)")
-    s.add_argument("--host", default=os.environ.get("OLLAMA_HOST", "127.0.0.1:11434"),
-                   help="Ollama host (default: 127.0.0.1:11434 or OLLAMA_HOST)")
-    s.add_argument("--model", default="", help="Model name (example: llama3.1:latest)")
-    s.add_argument("--temperature", type=float, default=None, help="Optional temperature")
-    s.add_argument("--system", default="", help="Extra system prompt (optional)")
-    s.add_argument("--no-memory", action="store_true", help="Do not inject GAIT pinned memory into system prompt")
-    s.add_argument("--also-memory", action="store_true", help="When using /revert, also rewind HEAD+ memory via reflog")
-    s.add_argument("--pin-note", default="", help="Optional note used by /pin")
-    s.add_argument("--message", default="chat", help="Commit message label for recorded turns")
-    s.add_argument("--echo-commit", action="store_true", help="Print short commit id after each recorded turn")
-    s.add_argument("--num-predict", type=int, default=200, help="Max tokens to generate per reply")
-    s.add_argument("--resume-turns", type=int, default=20,
-                   help="Replay last N turns from HEAD history into the chat context (default: 20)")
-    s.add_argument("--no-resume", action="store_true",
-                   help="Do not replay history (start fresh, only memory/system prompts)")
-    s.add_argument("--resume-from", default="HEAD",
-                   help="Commitish to resume from (default: HEAD)")
-    s.set_defaults(func=cmd_chat)
+    # ----------------------------
+    # Chat (local LLM)
+    #   - Ollama (11434)
+    #   - Foundry Local (63545)
+    #   - LM Studio (1234)
+    # ----------------------------
+    
+    chat = sub.add_parser(
+        "chat",
+        help="Interactive local chat (records every turn into GAIT)"
+    )
+    
+    # ----------------------------
+    # Ollama endpoint
+    #   - used when provider=ollama
+    #   - or when auto-detect hits 11434
+    # ----------------------------
+    chat.add_argument(
+        "--host",
+        default=os.environ.get("OLLAMA_HOST", "127.0.0.1:11434"),
+        help="Ollama host (default: 127.0.0.1:11434 or OLLAMA_HOST)"
+    )
+    
+    # ----------------------------
+    # Shared model argument
+    #   - Ollama: llama3.1, mistral, etc.
+    #   - Foundry: FULL model id (e.g. DeepSeek-R1-Distill-Qwen-1.5B-trtrtx-gpu:1)
+    #   - LM Studio: model name shown in UI
+    # ----------------------------
+    chat.add_argument(
+        "--model",
+        default="",
+        help="Model name or id (provider-specific)"
+    )
+    
+    # ----------------------------
+    # Generation controls
+    # ----------------------------
+    chat.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Optional temperature"
+    )
+    
+    chat.add_argument(
+        "--num-predict",
+        type=int,
+        default=200,
+        help="Max tokens per reply (maps to max_tokens for openai_compat)"
+    )
+    
+    # ----------------------------
+    # System prompt + memory + resume
+    # ----------------------------
+    chat.add_argument(
+        "--system",
+        default="",
+        help="Extra system prompt (optional)"
+    )
+    
+    chat.add_argument(
+        "--no-memory",
+        action="store_true",
+        help="Do not inject GAIT pinned memory into system prompt"
+    )
+    
+    chat.add_argument(
+        "--resume-turns",
+        type=int,
+        default=20,
+        help="Replay last N turns from HEAD history into chat context (default: 20)"
+    )
+    
+    chat.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Do not replay history (start fresh)"
+    )
+    
+    chat.add_argument(
+        "--resume-from",
+        default="HEAD",
+        help="Commitish to resume from (default: HEAD)"
+    )
+    
+    chat.add_argument(
+        "--also-memory",
+        action="store_true",
+        help="When using /revert, also rewind HEAD+ memory via reflog"
+    )
+    
+    # ----------------------------
+    # Small UX flags
+    # ----------------------------
+    chat.add_argument(
+        "--pin-note",
+        default="",
+        help="Optional note used by /pin"
+    )
+    
+    chat.add_argument(
+        "--message",
+        default="chat",
+        help="Commit message label for recorded turns"
+    )
+    
+    chat.add_argument(
+        "--echo-commit",
+        action="store_true",
+        help="Print short commit id after each recorded turn"
+    )
+    
+    # ----------------------------
+    # Provider selection
+    #
+    # Default = ""  → auto-detect by ports:
+    #   11434 → Ollama
+    #   63545 → Foundry Local
+    #   1234  → LM Studio
+    # ----------------------------
+    chat.add_argument(
+        "--provider",
+        default=os.environ.get("GAIT_PROVIDER", ""),
+        choices=["", "ollama", "openai_compat"],
+        help=(
+            "LLM provider backend.\n"
+            "If omitted, GAIT auto-detects local providers by port.\n"
+            "openai_compat works with Foundry Local and LM Studio."
+        )
+    )
+    
+    # ----------------------------
+    # OpenAI-compatible servers
+    #   (Foundry / LM Studio)
+    # ----------------------------
+    chat.add_argument(
+        "--base-url",
+        default=os.environ.get("GAIT_BASE_URL", ""),
+        help=(
+            "OpenAI-compatible base URL.\n"
+            "Examples:\n"
+            "  http://127.0.0.1:63545  (Foundry Local)\n"
+            "  http://127.0.0.1:1234   (LM Studio)"
+        )
+    )
+    
+    chat.add_argument(
+        "--api-key",
+        default=os.environ.get("GAIT_API_KEY", ""),
+        help="API key for OpenAI-compatible servers (often blank for local)"
+    )
+    
+    chat.set_defaults(func=cmd_chat)
+
 
     # ----------------------------
     # Remote plumbing (v0)
     # ----------------------------
 
-    s = sub.add_parser("remote", help="Manage remotes")
-    sub2 = s.add_subparsers(dest="remote_cmd", required=True)
+    rem = sub.add_parser("remote", help="Manage remotes")
+    sub2 = rem.add_subparsers(dest="remote_cmd", required=True)
 
     r = sub2.add_parser("add", help="Add a remote")
     r.add_argument("name")
     r.add_argument("url", help="Base gaithubd URL, e.g. http://127.0.0.1:8787")
     r.set_defaults(func=cmd_remote_add)
+
+    r = sub2.add_parser("list", help="List remotes")
+    r.add_argument("-v", "--verbose", action="store_true", help="Show URLs")
+    r.set_defaults(func=cmd_remote_list)
 
     s = sub.add_parser("push", help="Push objects + refs to remote")
     s.add_argument("remote", nargs="?", default="origin")
@@ -752,8 +903,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--branch", default="main")
     s.set_defaults(func=cmd_clone)
 
-    return p
+    s = sub.add_parser("verify", help="Verify refs + objects integrity")
+    s.set_defaults(func=cmd_verify)
 
+    return p
 
 def main() -> int:
     parser = build_parser()

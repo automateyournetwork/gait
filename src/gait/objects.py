@@ -28,6 +28,8 @@ def object_id(obj: Any) -> str:
 def fanout_path(objects_dir: Path, oid: str) -> Path:
     return objects_dir / oid[:2] / oid[2:4] / oid
 
+def canonical_payload_bytes(raw: bytes) -> bytes:
+    return raw[:-1] if raw.endswith(b"\n") else raw
 
 def store_object(objects_dir: Path, obj: Dict[str, Any]) -> str:
     """

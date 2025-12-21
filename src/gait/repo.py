@@ -277,6 +277,36 @@ class GaitRepo:
             raise FileNotFoundError(f"Branch does not exist: {name}")
         self.head_file.write_text(f"ref: refs/heads/{name}\n", encoding="utf-8")
 
+
+    def fast_forward_branch(self, branch: str, new_head: str) -> str:
+        """
+        Fast-forward branch to new_head if possible.
+        Returns the resolved new head.
+        """
+        from .objects import resolve_prefix
+    
+        if not new_head:
+            raise ValueError("Cannot fast-forward to empty commit id.")
+    
+        new_full = resolve_prefix(self.objects_dir, new_head)
+        cur = self.read_ref(branch).strip()
+    
+        # if branch empty, just set it
+        if not cur:
+            self.write_ref(branch, new_full)
+            return new_full
+    
+        cur_full = resolve_prefix(self.objects_dir, cur)
+    
+        if cur_full == new_full:
+            return new_full
+    
+        if not self.is_ancestor(cur_full, new_full):
+            raise ValueError(f"Non fast-forward: {branch} would move from {cur_full[:8]} to {new_full[:8]}")
+    
+        self.write_ref(branch, new_full)
+        return new_full
+
     # ----------------------------
     # Reset / revert helpers
     # ----------------------------
@@ -618,3 +648,4 @@ class GaitRepo:
 
     def get_turn(self, turn_id: str) -> Dict[str, Any]:
         return load_object(self.objects_dir, turn_id)
+

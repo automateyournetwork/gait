@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import re
 import hashlib
 import json
-import os
+import string
 import urllib.request
 import urllib.error
 from dataclasses import dataclass
@@ -11,6 +12,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .repo import GaitRepo
 
+_OID_RE = re.compile(r"^[0-9a-f]{64}$")
+_HEX = set(string.hexdigits.lower())
 
 # ---------------------------------------------------------------------
 # Canonical payload hashing rules (MUST match gait/objects.py)
@@ -140,7 +143,12 @@ class RemoteClient:
     # ---- objects ----
 
     def missing(self, oids: List[str]) -> List[str]:
-        r = _http_json("POST", f"{self.base()}/objects/missing", payload={"oids": oids})
+        r = _http_json(
+            "POST",
+            f"{self.base()}/objects/missing",
+            token=self.token,
+            payload={"oids": oids},
+        )
         return list(r.get("missing") or [])
 
     def get_object_bytes(self, oid: str) -> bytes:
@@ -153,7 +161,7 @@ class RemoteClient:
     # ---- refs ----
 
     def get_refs(self) -> Dict[str, Any]:
-        return _http_json("GET", f"{self.base()}/refs")
+        return _http_json("GET", f"{self.base()}/refs", token=self.token)
 
     def put_head_ref(self, branch: str, oid: str, *, expected_old: Optional[str]) -> None:
         headers = {}
@@ -172,15 +180,22 @@ class RemoteClient:
 # Local object enumeration + storage
 # ---------------------------------------------------------------------
 
+def _is_oid(name: str) -> bool:
+    if len(name) != 64:
+        return False
+    n = name.lower()
+    return all(c in _HEX for c in n)
+
 def _iter_local_oids(repo: GaitRepo) -> List[str]:
     if not repo.objects_dir.exists():
         return []
     out: List[str] = []
     for p in repo.objects_dir.rglob("*"):
-        if p.is_file() and len(p.name) == 64:
-            out.append(p.name)
+        if not p.is_file():
+            continue
+        if _is_oid(p.name):
+            out.append(p.name.lower())
     return out
-
 
 def _store_local_object_bytes(repo: GaitRepo, oid: str, canon_bytes: bytes) -> None:
     # store as canonical bytes + newline (matches objects.py)
@@ -192,6 +207,8 @@ def _store_local_object_bytes(repo: GaitRepo, oid: str, canon_bytes: bytes) -> N
 
 
 def _load_local_object_bytes(repo: GaitRepo, oid: str) -> bytes:
+    if not _OID_RE.match(oid):
+        raise RuntimeError(f"Invalid oid encountered during push: {oid!r}")
     path = repo.objects_dir / oid[:2] / oid[2:4] / oid
     return path.read_bytes()
 
@@ -296,13 +313,27 @@ def fetch(repo: GaitRepo, spec: RemoteSpec, *, token: str) -> Tuple[Dict[str, st
 
     return heads, mems
 
-
 def pull(repo: GaitRepo, spec: RemoteSpec, *, token: str, branch: Optional[str] = None, with_memory: bool = False) -> str:
     branch = branch or repo.current_branch()
-    fetch(repo, spec, token=token)
-    remote_branch = f"remotes/{spec.name}/{branch}"
-    return repo.merge(remote_branch, message=f"pull {spec.name}/{branch}", with_memory=with_memory)
 
+    heads, mems = fetch(repo, spec, token=token)
+
+    remote_tracking = f"remotes/{spec.name}/{branch}"
+    remote_head = repo.read_ref(remote_tracking).strip()
+    if not remote_head:
+        raise RuntimeError(f"Remote branch not found: {spec.name}/{branch}")
+
+    # fast-forward only
+    new_head = repo.fast_forward_branch(branch, remote_head)
+
+    # optionally fast-forward memory too (simple policy for Phase 1)
+    if with_memory:
+        remote_mem_ref = f"remotes/{spec.name}/{branch}"
+        remote_mem = repo.read_memory_ref(remote_mem_ref).strip()
+        if remote_mem:
+            repo.write_memory_ref(remote_mem, branch)
+
+    return new_head
 
 def clone_into(dest: Path, spec: RemoteSpec, *, token: str, branch: str = "main") -> None:
     dest.mkdir(parents=True, exist_ok=True)
@@ -322,3 +353,13 @@ def clone_into(dest: Path, spec: RemoteSpec, *, token: str, branch: str = "main"
         repo.write_memory_ref(mem, branch)
 
     repo.checkout(branch)
+
+def remote_list(repo: GaitRepo) -> Dict[str, str]:
+    cfg = _load_config(repo)
+    remotes = cfg.get("remotes") or {}
+    out: Dict[str, str] = {}
+    for name, meta in remotes.items():
+        url = (meta.get("url") or "").strip()
+        if url:
+            out[name] = url
+    return out
