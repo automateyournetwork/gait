@@ -370,6 +370,6 @@ Remote sync is intentionally not required for GAIT’s core philosophy — but w
 
 Status
 
-Version: 0.0.1
+Version: 0.0.2
 
 State: Core model stable, active development

@@ -48,11 +48,9 @@ def _list_branches(repo: GaitRepo) -> list[str]:
 # Remote 
 # ---------------------------
 
-def _require_gaithub_token() -> str:
+def _get_gaithub_token() -> Optional[str]:
     tok = os.environ.get("GAITHUB_TOKEN", "").strip()
-    if not tok:
-        raise RuntimeError("Missing GAITHUB_TOKEN env var (PAT-style token for gaithubd).")
-    return tok
+    return tok or None
 
 def cmd_remote_add(args: argparse.Namespace) -> int:
     repo = GaitRepo.discover()
@@ -62,17 +60,18 @@ def cmd_remote_add(args: argparse.Namespace) -> int:
 
 def cmd_push(args: argparse.Namespace) -> int:
     repo = GaitRepo.discover()
-    token = _require_gaithub_token()
+    token = _get_gaithub_token()
     base_url = remote_get(repo, args.remote)
 
     spec = RemoteSpec(base_url=base_url, owner=args.owner, repo=args.repo, name=args.remote)
     remote_push(repo, spec, token=token, branch=args.branch)
+
     print(f"pushed {args.branch or repo.current_branch()} to {args.remote} ({args.owner}/{args.repo})")
     return 0
 
 def cmd_fetch(args: argparse.Namespace) -> int:
     repo = GaitRepo.discover()
-    token = _require_gaithub_token()
+    token = _get_gaithub_token()
     base_url = remote_get(repo, args.remote)
 
     spec = RemoteSpec(base_url=base_url, owner=args.owner, repo=args.repo, name=args.remote)
@@ -82,7 +81,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 
 def cmd_pull(args: argparse.Namespace) -> int:
     repo = GaitRepo.discover()
-    token = _require_gaithub_token()
+    token = _get_gaithub_token()
     base_url = remote_get(repo, args.remote)
 
     spec = RemoteSpec(base_url=base_url, owner=args.owner, repo=args.repo, name=args.remote)
@@ -99,7 +98,7 @@ def cmd_pull(args: argparse.Namespace) -> int:
     return 0
 
 def cmd_clone(args: argparse.Namespace) -> int:
-    token = _require_gaithub_token()
+    token = _get_gaithub_token()
     dest = Path(args.path).resolve()
 
     spec = RemoteSpec(base_url=args.url, owner=args.owner, repo=args.repo, name=args.remote)
