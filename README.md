@@ -1,21 +1,11 @@
 # gait
 An open source version and source control system, inspired by Git, for Artificial Intelligence Agents
 
-GAIT — Git-Like Version Control for AI Conversations
+Git-Like Version Control for AI Conversations
 
-GAIT is a lightweight, Git-inspired version control system for AI conversations, prompts, and memory.
+GAIT is an open-source, Git-inspired version control system for AI conversations, prompts, and long-lived memory.
 
-It lets you:
-
-Record user ↔ assistant turns as immutable objects
-
-Commit conversation state to branches
-
-Pin important turns into long-lived “memory”
-
-Rewind history and memory safely
-
-Branch, merge, and experiment without losing context
+It treats AI context as versioned infrastructure, not disposable chat logs.
 
 Think of GAIT as Git for reasoning, not files.
 
@@ -23,26 +13,50 @@ Why GAIT Exists
 
 AI workflows don’t behave like filesystems:
 
-Conversations evolve
+Conversations evolve over time
 
-“Good” context must be remembered
+Some context should persist, some should not
 
-“Bad” turns must be undone
+Bad turns must be reversible
 
 Experiments should not pollute production memory
 
-GAIT solves this by separating history from memory, while keeping both versioned, inspectable, and reversible.
+Prompt changes need safe branching and rollback
+
+Traditional chat tools collapse history, memory, and state into one fragile stream.
+
+GAIT separates them — while keeping everything inspectable, versioned, and reversible.
+
+What GAIT Lets You Do
+
+Record user ↔ assistant turns as immutable objects
+
+Commit conversation state to branches
+
+Pin important turns into explicit, long-lived memory
+
+Resume conversations safely (or start fresh automatically)
+
+Branch, merge, and experiment without losing context
+
+Rewind history and memory independently
+
+Chat interactively with local LLMs while versioning every turn
 
 Core Concepts
 Turns
 
 A turn is a single user + assistant interaction.
 
-User:      "What is X?"
-Assistant: "X is Y..."
+User:      "What is GAIT?"
+Assistant: "GAIT is Git for AI conversations."
 
 
-Turns are immutable and stored as content-addressed objects.
+Turns are immutable
+
+Content-addressed
+
+Stored once, referenced everywhere
 
 Commits
 
@@ -54,15 +68,19 @@ Merge commits contain no turns
 
 Commits form a DAG (just like Git)
 
+This allows safe history traversal, branching, and merges.
+
 Memory (HEAD+ Memory)
 
 Memory is explicitly pinned context that survives across turns.
 
-Memory is not automatic
+Key properties:
+
+Memory is opt-in
 
 Only pinned turns enter memory
 
-Memory is versioned independently of commits
+Memory is versioned independently from commits
 
 Memory has its own reflog
 
@@ -81,15 +99,21 @@ GAIT stores everything in a .gait/ directory:
 ├── turns.jsonl       # turn → commit log
 └── memory.jsonl      # memory reflog
 
+
+No magic. Everything is inspectable.
+
 Installation (Dev / Editable)
 python -m venv GAITING
 source GAITING/bin/activate
 pip install -e .
 
 
-This installs the gait CLI into your virtualenv.
+This installs the gait CLI into your virtual environment.
+
+(PyPI packaging coming next.)
 
 Quick Start
+Initialize a repo
 gait init
 
 Record a turn
@@ -114,13 +138,47 @@ Pinned turns now become part of HEAD+ memory.
 
 gait memory
 
-View commit history
+View history
 gait log
-
-Show a commit’s conversation
 gait show HEAD
 
+Interactive Chat (Local LLMs)
+
+GAIT includes an interactive chat mode that records every turn automatically.
+
+gait chat
+
+Supported local providers
+
+GAIT auto-detects local LLMs in this order:
+
+Ollama — 127.0.0.1:11434
+
+Foundry Local — 127.0.0.1:63545
+
+LM Studio — 127.0.0.1:1234
+
+No flags required in the common case.
+
+Defaults & safety
+
+If history exists → GAIT resumes automatically
+
+If HEAD is empty → GAIT starts fresh (no crash)
+
+Memory is injected only if pinned
+
+Resume can be disabled with --no-resume
+
+Environment overrides
+export GAIT_PROVIDER=openai_compat
+export GAIT_BASE_URL=http://127.0.0.1:1234
+export GAIT_DEFAULT_MODEL=gemma-3-4b
+
 Branching & Experiments
+
+Create and switch branches directly from the CLI:
+
 gait branch experiment
 gait checkout experiment
 
@@ -129,9 +187,18 @@ Branches:
 
 Inherit commit history
 
-Optionally inherit memory (--no-inherit-memory supported)
+Optionally inherit memory (--no-inherit-memory)
 
-Perfect for prompt experiments.
+Are perfect for prompt and reasoning experiments
+
+Inside gait chat, you can also:
+
+/branches
+/branch new-idea
+/checkout new-idea
+
+
+(No context loss.)
 
 Merging
 gait merge experiment
@@ -151,43 +218,27 @@ Preserve provenance
 Are logged in the memory reflog
 
 Revert vs Reset (Important)
-gait revert
-
-A safe undo.
-
+gait revert — safe undo
 gait revert
 gait revert --also-memory
 
 
-Moves HEAD to the parent of the current commit
+Moves HEAD to the parent commit
 
-Optionally rewinds memory to the correct historical state
+Optionally rewinds memory correctly
 
-Best for:
+Best for interactive usage
 
-“Oops, last turn was bad”
-
-Interactive usage
-
-gait reset
-
-A power tool, like git reset.
-
+gait reset — power tool
 gait reset <commit>
 gait reset --hard
 
 
 reset → move HEAD only
 
-reset --hard → move HEAD and memory
+reset --hard → move HEAD + memory
 
-Best for:
-
-Timeline surgery
-
-Returning to a known-good state
-
-Cleaning experimental branches
+Best for timeline surgery and cleanup.
 
 Memory Reflog (The Secret Sauce)
 
@@ -201,9 +252,9 @@ HEAD commit at the time
 
 Old memory → new memory
 
-Reason (pin, unpin, merge-memory, revert-memory, reset-memory)
+Reason (pin, unpin, merge, revert, reset)
 
-This makes memory reversible, auditable, and safe.
+This makes memory auditable, reversible, and safe.
 
 Context Export (Agent-Ready)
 gait context --json
@@ -230,13 +281,15 @@ MCP (future)
 
 What GAIT Is Not (Yet)
 
-❌ No file tracking
+❌ File version control
 
-❌ No automatic memory
+❌ Automatic memory
 
-❌ No MCP server (coming later)
+❌ Hosted SaaS
 
-❌ No remote sync
+❌ MCP server (coming)
+
+❌ Remote sync (gaithub in progress)
 
 GAIT is intentionally small, explicit, and correct.
 
@@ -251,13 +304,5 @@ GAIT treats AI context like production infrastructure — not chat logs.
 Status
 
 Version: 0.0.1
-State: Actively developed, core model stable
-Next milestones:
 
-gait reset polish
-
-Memory diff / inspect
-
-MCP integration
-
-Remote transport
+State: Core model stable, active development
