@@ -441,44 +441,58 @@ def cmd_chat(args: argparse.Namespace) -> int:
         if not args.model:
             args.model = d.get("model", "")
 
-    provider = args.provider or "ollama"
-    host = args.host
-    base_url = args.base_url
-    api_key = args.api_key
-    model = args.model or os.environ.get("GAIT_MODEL", "").strip()
-
-    # ----------------------------
-    # Default model selection
-    # ----------------------------
-    if provider == "ollama":
-        if not model:
-            models = ollama_list_models(host)
-            if not models:
-                raise RuntimeError("No Ollama models found. Try: ollama pull llama3.1")
-            model = "llama3.1" if "llama3.1" in models else models[0]
-            print(f"[gait] no --model provided; using: {model}")
-
-    elif provider == "openai_compat":
-        if not base_url:
-            raise RuntimeError("openai_compat requires --base-url (or auto-detection).")
-
-        # Foundry: default model already set by auto_detect() (full ID), but still validate.
-        if not model:
-            raise RuntimeError(
-                "No model specified for openai_compat.\n"
-                "Foundry often returns empty /v1/models, so you must pass a model ID.\n"
-                "Example:\n"
-                "  gait chat --provider openai_compat --base-url http://127.0.0.1:63545 "
-                "--model DeepSeek-R1-Distill-Qwen-1.5B-trtrtx-gpu:1"
-            )
-
-        # IMPORTANT: If user gave the alias deepseek-r1-1.5b, Foundry will 400.
-        # We can auto-map just this one known alias as a convenience.
-        if base_url.startswith("http://127.0.0.1:63545") and model == "deepseek-r1-1.5b":
-            model = "DeepSeek-R1-Distill-Qwen-1.5B-trtrtx-gpu:1"
-
-    else:
-        raise RuntimeError(f"Unknown provider: {provider}")
+        provider = (args.provider or "").strip()          # allow "" meaning auto earlier
+        host = args.host
+        base_url = args.base_url
+        api_key = args.api_key
+        
+        model = (args.model or os.environ.get("GAIT_MODEL", "").strip()).strip()
+        default_model = os.environ.get("GAIT_DEFAULT_MODEL", "").strip()
+        
+        # If you already ran auto-detect earlier, provider/base_url/host/model may already be set.
+        # If not, you'll want to do it before this section.
+        
+        # ----------------------------
+        # Default model selection
+        # ----------------------------
+        if provider == "ollama":
+            if not model:
+                models = ollama_list_models(host)
+                if not models:
+                    raise RuntimeError("No Ollama models found. Try: ollama pull llama3.1")
+                model = "llama3.1" if "llama3.1" in models else models[0]
+                print(f"[gait] no --model provided; using: {model}")
+        
+        elif provider == "openai_compat":
+            if not base_url:
+                raise RuntimeError("openai_compat requires --base-url (or auto-detection).")
+        
+            # ✅ If user didn't provide --model (and GAIT_MODEL isn't set), use GAIT_DEFAULT_MODEL
+            if not model and default_model:
+                model = default_model
+                print(f"[gait] using default model from GAIT_DEFAULT_MODEL: {model}")
+        
+            # Still no model -> error
+            if not model:
+                raise RuntimeError(
+                    "No model specified for openai_compat.\n"
+                    "Set GAIT_DEFAULT_MODEL (recommended) or pass --model explicitly.\n"
+                    "Examples:\n"
+                    "  export GAIT_DEFAULT_MODEL=gemma-3-4b\n"
+                    "  gait chat --provider openai_compat --base-url http://127.0.0.1:1234\n"
+                    "\n"
+                    "Foundry note: it often returns empty /v1/models so you may need the full model ID.\n"
+                    "  gait chat --provider openai_compat --base-url http://127.0.0.1:63545 "
+                    "--model DeepSeek-R1-Distill-Qwen-1.5B-trtrtx-gpu:1"
+                )
+        
+            # Convenience mapping for Foundry alias -> full ID
+            if base_url.startswith("http://127.0.0.1:63545") and model == "deepseek-r1-1.5b":
+                model = "DeepSeek-R1-Distill-Qwen-1.5B-trtrtx-gpu:1"
+        
+        else:
+            # If you want "provider==''" to mean auto-detect, you shouldn't reach here.
+            raise RuntimeError(f"Unknown provider: {provider!r}")
 
     where = host if provider == "ollama" else base_url
     print(f"[gait] repo={repo.root} branch={repo.current_branch()} provider={provider} model={model} endpoint={where}")
