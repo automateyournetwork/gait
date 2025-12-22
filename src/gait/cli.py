@@ -681,6 +681,9 @@ def cmd_chat(args: argparse.Namespace) -> int:
                 print(f"[gait] revert error: {e}")
             continue
 
+        if user_text in ("/undo",):
+            user_text = "/revert"
+
         if user_text == "/pin":
             head = repo.head_commit_id()
             if not head:
@@ -711,6 +714,40 @@ def cmd_chat(args: argparse.Namespace) -> int:
                 messages = build_messages_for_current_branch()
             except Exception as e:
                 print(f"[gait] pin error: {e}")
+            continue
+
+        if user_text.startswith("/merge "):
+            parts = user_text.split()
+            src = parts[1] if len(parts) > 1 else ""
+            with_mem = ("--with-memory" in parts)
+
+            if not src or src.startswith("--"):
+                print("[gait] usage: /merge <source-branch> [--with-memory]")
+                continue
+            
+            try:
+                merge_id = repo.merge(src, message="chat merge", with_memory=with_mem)
+                print(f"[gait] merged: {src} -> {repo.current_branch()}")
+                print(f"[gait] HEAD:   {merge_id}")
+                if with_mem:
+                    print(f"[gait] memory: {repo.read_memory_ref(repo.current_branch())}")
+                messages = build_messages_for_current_branch()
+            except Exception as e:
+                print(f"[gait] merge error: {e}")
+            continue
+
+        if user_text in ("/head", "/last"):
+            head = repo.head_commit_id()
+            if not head:
+                print("[gait] HEAD: (empty)")
+                continue
+            c = repo.get_commit(head)
+            msg = c.get("message") or ""
+            created = c.get("created_at") or ""
+            kind = c.get("kind") or ""
+            parents = c.get("parents") or []
+            p = ",".join(short_oid(x) for x in parents) if parents else "-"
+            print(f"[gait] HEAD: {short_oid(head)}  {created}  {kind}  p=[{p}]  {msg}")
             continue
 
         # --- normal chat turn ---

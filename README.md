@@ -1,5 +1,5 @@
 # gait
-An open source version and source control system, inspired by Git, for Artificial Intelligence Agents
+GAIT
 
 Git-Like Version Control for AI Conversations
 
@@ -46,13 +46,15 @@ Chat interactively with local LLMs while versioning every turn
 Core Concepts
 Turns
 
-A turn is a single user + assistant interaction.
+A turn is a single user + assistant interaction:
 
 User:      "What is GAIT?"
 Assistant: "GAIT is Git for AI conversations."
 
 
-Turns are immutable
+Turns are:
+
+Immutable
 
 Content-addressed
 
@@ -60,7 +62,7 @@ Stored once, referenced everywhere
 
 Commits
 
-A commit references one or more turns and has parents, metadata, and a branch.
+A commit references one or more turns and includes metadata and parents.
 
 Normal commits contain turns
 
@@ -68,7 +70,7 @@ Merge commits contain no turns
 
 Commits form a DAG (just like Git)
 
-This allows safe history traversal, branching, and merges.
+This enables safe history traversal, branching, and merges.
 
 Memory (HEAD+ Memory)
 
@@ -108,9 +110,9 @@ source GAITING/bin/activate
 pip install -e .
 
 
-This installs the gait CLI into your virtual environment.
+This installs the gait CLI into your environment.
 
-(PyPI packaging coming next.)
+PyPI packaging coming next.
 
 Quick Start
 Initialize a repo
@@ -160,24 +162,26 @@ LM Studio — 127.0.0.1:1234
 
 No flags required in the common case.
 
-Defaults & safety
+Defaults & Safety
 
 If history exists → GAIT resumes automatically
 
-If HEAD is empty → GAIT starts fresh (no crash)
+If HEAD is empty → GAIT starts fresh
 
 Memory is injected only if pinned
 
 Resume can be disabled with --no-resume
 
-Environment overrides
+Output is not truncated unless you explicitly set a token cap
+
+Environment Overrides
 export GAIT_PROVIDER=openai_compat
 export GAIT_BASE_URL=http://127.0.0.1:1234
 export GAIT_DEFAULT_MODEL=gemma-3-4b
 
 Branching & Experiments
 
-Create and switch branches directly from the CLI:
+Create and switch branches:
 
 gait branch experiment
 gait checkout experiment
@@ -189,22 +193,24 @@ Inherit commit history
 
 Optionally inherit memory (--no-inherit-memory)
 
-Are perfect for prompt and reasoning experiments
+Are ideal for prompt and reasoning experiments
 
-Inside gait chat, you can also:
-
+Inside gait chat
 /branches
 /branch new-idea
 /checkout new-idea
 
 
-(No context loss.)
+No context loss.
 
 Merging
+
+Merge a branch into the current branch:
+
 gait merge experiment
 
 
-Optional memory merge:
+Merge memory explicitly:
 
 gait merge experiment --with-memory
 
@@ -229,7 +235,7 @@ Optionally rewinds memory correctly
 
 Best for interactive usage
 
-gait reset — power tool
+gait reset — power tool (advanced)
 gait reset <commit>
 gait reset --hard
 
@@ -238,11 +244,11 @@ reset → move HEAD only
 
 reset --hard → move HEAD + memory
 
-Best for timeline surgery and cleanup.
+Best for timeline surgery and cleanup
 
 Memory Reflog (The Secret Sauce)
 
-Every memory mutation is logged with:
+Every memory mutation is recorded with:
 
 Timestamp
 
@@ -282,11 +288,8 @@ MCP (future)
 What GAIT Is Not (Yet)
 
 ❌ File version control
-
 ❌ Automatic memory
-
 ❌ Hosted SaaS
-
 ❌ MCP server (coming)
 
 GAIT is intentionally small, explicit, and correct.
@@ -299,81 +302,94 @@ Reversibility is non-negotiable.
 
 GAIT treats AI context like production infrastructure — not chat logs.
 
-## gaithub - remote hub for gait repositories
+gaithub — Remote Hub for GAIT Repositories (Early Access)
 
-Remote Repository (gaithub – Early Access)
+GAIT supports an experimental remote backend called gaithub.
 
-GAIT supports an experimental remote repository backend called **gaithub**.
+This enables pushing, pulling, and cloning GAIT repositories over HTTP — purpose-built for AI turns, commits, and memory.
 
-This enables pushing, pulling, and cloning GAIT repositories over HTTP — similar to how Git talks to GitHub — but purpose-built for AI context, turns, commits, and memory.
-
-### Temporary Cloud Run Endpoint
-
-While DNS and permanent hosting are being finalized, gaithub is currently running on Google Cloud Run at:
-
+Temporary Cloud Run Endpoint
 https://gaithub-960937205198.us-central1.run.app
+
 
 ⚠️ Important
 
-- This endpoint is temporary.
-- It may be reset, redeployed, or replaced without notice.
-- A stable domain name and authentication model are on the roadmap.
+Temporary endpoint
 
-### Early Access Limitation (Write Access)
+May be reset or redeployed
 
-For now, this public test instance allows **anonymous write access only to my namespace**:
+Stable DNS and auth are coming
 
-- ✅ Allowed: `--owner john`
-- ❌ Not allowed (will be rejected): `--owner <anyone-else>`
+Early Access Limitation (Write Access)
 
-This is intentional while user accounts + authentication are being built.
+For now, anonymous write access is limited to my namespace:
 
-> If you try to push to another owner, you will get a 403 (Forbidden).
+✅ Allowed: --owner john
 
-### Using gaithub as a Remote
+❌ Rejected: --owner anyone-else
 
-Add it as a remote:
+This is intentional while authentication is being built.
 
-```bash
+Using gaithub as a Remote
+Add remote
 gait remote add cloud https://gaithub-960937205198.us-central1.run.app
-Push a repository (write access currently limited to --owner john):
 
-bash
-Copy code
+Push (early access)
 gait push cloud --owner john --repo my-ai-project
-Clone from the remote:
 
-bash
-Copy code
+Clone
 gait clone https://gaithub-960937205198.us-central1.run.app \
   --owner john \
   --repo my-ai-project \
   --path ./my-ai-project-clone
-Verify the clone:
 
-bash
-Copy code
+Verify
 cd my-ai-project-clone
 gait status
 gait log --limit 5
 gait verify
+
 Roadmap: gaithub
-Planned improvements include:
 
-Stable DNS (e.g. gaithub.com)
+Stable DNS (gaithub.com)
 
-Authentication & authorization (user accounts + namespaces)
+Authentication & namespaces
 
-Forks and pull requests (GAIT-native, not Git)
+Forks & pull requests (GAIT-native)
 
 Remote memory policies
 
-Hosted public and private repositories
+Public & private repos
 
 MCP-compatible remote context export
 
 Status
 
-Version: 0.0.2
+Version: 0.0.4
 
 State: Core model stable, active development
+
+What I Added / Fixed (Quick Checklist)
+✅ Added
+
+Clear section hierarchy
+
+Explicit safety guarantees
+
+Clarified output truncation behavior
+
+/merge and memory merge explanation
+
+Clear separation between revert vs reset
+
+Stronger gaithub early-access framing
+
+Agent-ready positioning without overclaiming MCP
+
+✅ Tightened
+
+Philosophy phrasing (less manifesto, more precision)
+
+Repetition removal
+
+Command examples grouped logically
