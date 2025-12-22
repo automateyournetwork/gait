@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import urllib.request
 import urllib.error
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 
 # ----------------------------
@@ -63,18 +63,35 @@ def ollama_chat(
     messages: list[dict],
     *,
     temperature: float | None = None,
-    num_predict: int = 200,
+    num_predict: int | None = None,
+    debug: bool = False,
 ) -> str:
+    """
+    If num_predict is None, we DO NOT send options.num_predict.
+    That means: no explicit output cap (use Ollama/model defaults).
+    """
     payload: dict = {
         "model": model,
         "messages": messages,
         "stream": False,
-        "options": {"num_predict": num_predict},
     }
+
+    options: dict[str, Any] = {}
     if temperature is not None:
-        payload["options"]["temperature"] = temperature
+        options["temperature"] = float(temperature)
+    if num_predict is not None:
+        options["num_predict"] = int(num_predict)
+
+    if options:
+        payload["options"] = options
 
     r = _http_json(_ollama_url(host, "/api/chat"), method="POST", payload=payload, timeout=600.0)
+
+    if debug:
+        done_reason = r.get("done_reason") or r.get("doneReason")
+        if done_reason:
+            print(f"[gait] ollama done_reason={done_reason}")
+
     return ((r.get("message") or {}).get("content")) or ""
 
 
@@ -94,7 +111,7 @@ def _openai_base(base_url: str) -> str:
 
 def openai_compat_list_models(base_url: str, api_key: str = "") -> list[str]:
     b = _openai_base(base_url)
-    headers = {}
+    headers: dict[str, str] = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     r = _http_json(f"{b}/models", method="GET", headers=headers, timeout=30.0)
@@ -114,10 +131,15 @@ def openai_compat_chat(
     *,
     api_key: str = "",
     temperature: float | None = None,
-    max_tokens: int = 200,
+    max_tokens: int | None = None,
+    debug: bool = False,
 ) -> str:
+    """
+    If max_tokens is None, we DO NOT send it.
+    That means: no explicit output cap (server/model default).
+    """
     b = _openai_base(base_url)
-    headers = {}
+    headers: dict[str, str] = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
@@ -125,15 +147,21 @@ def openai_compat_chat(
         "model": model,
         "messages": messages,
         "stream": False,
-        "max_tokens": max_tokens,
     }
     if temperature is not None:
-        payload["temperature"] = temperature
+        payload["temperature"] = float(temperature)
+    if max_tokens is not None:
+        payload["max_tokens"] = int(max_tokens)
 
     r = _http_json(f"{b}/chat/completions", method="POST", payload=payload, headers=headers, timeout=600.0)
 
-    # OpenAI-style:
-    # { "choices":[{"message":{"role":"assistant","content":"..."}}] }
+    if debug:
+        choices = r.get("choices") or []
+        if choices and isinstance(choices, list):
+            fr = (choices[0] or {}).get("finish_reason")
+            if fr:
+                print(f"[gait] openai_compat finish_reason={fr}")
+
     choices = r.get("choices") or []
     if choices and isinstance(choices, list):
         msg = (choices[0] or {}).get("message") or {}
@@ -141,5 +169,4 @@ def openai_compat_chat(
         if isinstance(content, str):
             return content
 
-    # Fallback if a server returns something else
     return ""

@@ -4,6 +4,7 @@ import os
 import argparse
 import json
 import socket
+from typing import Optional
 
 from pathlib import Path
 
@@ -890,7 +891,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument(
         "--num-predict",
         type=int,
-        default=200,
+        default=None,
         help="Max tokens per reply (maps to max_tokens for openai_compat)"
     )
     

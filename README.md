@@ -303,11 +303,11 @@ GAIT treats AI context like production infrastructure — not chat logs.
 
 Remote Repository (gaithub – Early Access)
 
-GAIT supports an experimental remote repository backend called gaithub.
+GAIT supports an experimental remote repository backend called **gaithub**.
 
 This enables pushing, pulling, and cloning GAIT repositories over HTTP — similar to how Git talks to GitHub — but purpose-built for AI context, turns, commits, and memory.
 
-Temporary Cloud Run Endpoint
+### Temporary Cloud Run Endpoint
 
 While DNS and permanent hosting are being finalized, gaithub is currently running on Google Cloud Run at:
 
@@ -315,48 +315,54 @@ https://gaithub-960937205198.us-central1.run.app
 
 ⚠️ Important
 
-This endpoint is temporary
+- This endpoint is temporary.
+- It may be reset, redeployed, or replaced without notice.
+- A stable domain name and authentication model are on the roadmap.
 
-It may be reset, redeployed, or replaced without notice
+### Early Access Limitation (Write Access)
 
-A stable domain name and authentication model are on the roadmap
+For now, this public test instance allows **anonymous write access only to my namespace**:
 
-Using gaithub as a Remote
+- ✅ Allowed: `--owner john`
+- ❌ Not allowed (will be rejected): `--owner <anyone-else>`
 
-You can treat this endpoint as a GAIT remote for early testing.
+This is intentional while user accounts + authentication are being built.
+
+> If you try to push to another owner, you will get a 403 (Forbidden).
+
+### Using gaithub as a Remote
 
 Add it as a remote:
 
+```bash
 gait remote add cloud https://gaithub-960937205198.us-central1.run.app
+Push a repository (write access currently limited to --owner john):
 
-
-Push a repository:
-
+bash
+Copy code
 gait push cloud --owner john --repo my-ai-project
-
-
 Clone from the remote:
 
+bash
+Copy code
 gait clone https://gaithub-960937205198.us-central1.run.app \
   --owner john \
   --repo my-ai-project \
   --path ./my-ai-project-clone
-
-
 Verify the clone:
 
+bash
+Copy code
 cd my-ai-project-clone
 gait status
 gait log --limit 5
 gait verify
-
 Roadmap: gaithub
-
 Planned improvements include:
 
-Stable DNS (e.g. gaithub.ai or similar)
+Stable DNS (e.g. gaithub.com)
 
-Authentication & authorization
+Authentication & authorization (user accounts + namespaces)
 
 Forks and pull requests (GAIT-native, not Git)
 
@@ -365,8 +371,6 @@ Remote memory policies
 Hosted public and private repositories
 
 MCP-compatible remote context export
-
-Remote sync is intentionally not required for GAIT’s core philosophy — but when used, it enables collaboration, backup, and distributed agent workflows.
 
 Status
 
