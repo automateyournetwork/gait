@@ -335,6 +335,14 @@ def pull(repo: GaitRepo, spec: RemoteSpec, *, token: str, branch: Optional[str] 
 
     return new_head
 
+def create_repo(spec: RemoteSpec, *, token: str) -> None:
+    """
+    Initialize a repo on gaithubd (creates dirs + meta.json).
+    Requires Bearer token where token user == owner.
+    """
+    _http_json("POST", f"{_repo_base(spec.base_url, spec.owner, spec.repo)}", token=token, payload={})
+
+
 def clone_into(dest: Path, spec: RemoteSpec, *, token: str, branch: str = "main") -> None:
     dest.mkdir(parents=True, exist_ok=True)
     repo = GaitRepo(root=dest)

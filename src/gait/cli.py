@@ -20,6 +20,7 @@ from .remote import (
     remote_add, remote_get, remote_list,
     push as remote_push, fetch as remote_fetch, pull as remote_pull,
     clone_into,
+    create_repo as remote_create_repo,
 )
 from .verify import verify_repo
 from .llm import (
@@ -64,10 +65,22 @@ def cmd_remote_add(args: argparse.Namespace) -> int:
 def cmd_push(args: argparse.Namespace) -> int:
     repo = GaitRepo.discover()
     token = _get_gaithub_token()
-    base_url = remote_get(repo, args.remote)
+    if not token:
+        raise RuntimeError("GAITHUB_TOKEN is not set")
 
+    base_url = remote_get(repo, args.remote)
     spec = RemoteSpec(base_url=base_url, owner=args.owner, repo=args.repo, name=args.remote)
-    remote_push(repo, spec, token=token, branch=args.branch)
+
+    try:
+        remote_push(repo, spec, token=token, branch=args.branch)
+    except RuntimeError as e:
+        msg = str(e)
+        # if gaithub says repo isn't initialized, create it then retry once
+        if "Repo not initialized for this owner" in msg:
+            remote_create_repo(spec, token=token)
+            remote_push(repo, spec, token=token, branch=args.branch)
+        else:
+            raise
 
     print(f"pushed {args.branch or repo.current_branch()} to {args.remote} ({args.owner}/{args.repo})")
     return 0
@@ -121,6 +134,19 @@ def cmd_remote_list(args: argparse.Namespace) -> int:
             print(f"{name}\t{url}")
         else:
             print(name)
+    return 0
+
+def cmd_repo_create(args: argparse.Namespace) -> int:
+    repo = GaitRepo.discover()
+    token = _get_gaithub_token()
+    if not token:
+        raise RuntimeError("GAITHUB_TOKEN is not set")
+
+    base_url = remote_get(repo, args.remote)
+    spec = RemoteSpec(base_url=base_url, owner=args.owner, repo=args.repo, name=args.remote)
+
+    remote_create_repo(spec, token=token)
+    print(f"created remote repo {args.owner}/{args.repo} on {args.remote}")
     return 0
 
 def cmd_verify(args: argparse.Namespace) -> int:
@@ -929,6 +955,34 @@ def cmd_chat(args: argparse.Namespace) -> int:
                 print(f"[gait] push error: {e}")
             continue
 
+        if user_text.startswith("/repo-create"):
+            parts = user_text.split()
+            remote_name = "origin"
+            owner = ""
+            repo_name = ""
+    
+            if len(parts) >= 2 and not parts[1].startswith("--"):
+                remote_name = parts[1]
+    
+            for i, p in enumerate(parts):
+                if p == "--owner" and i + 1 < len(parts):
+                    owner = parts[i + 1]
+                if p == "--repo" and i + 1 < len(parts):
+                    repo_name = parts[i + 1]
+    
+            if not owner or not repo_name:
+                print("[gait] usage: /repo-create [remote] --owner OWNER --repo REPO")
+                continue
+            
+            try:
+                token = _require_gaithub_token()
+                spec = _remote_spec_from_repo(remote_name, owner, repo_name)
+                remote_create_repo(spec, token=token)
+                print(f"[gait] created remote repo {owner}/{repo_name} on {remote_name}")
+            except Exception as e:
+                print(f"[gait] repo-create error: {e}")
+            continue
+
         # --- normal chat turn ---
         messages.append({"role": "user", "content": user_text})
 
@@ -1268,6 +1322,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--remote", default="origin")
     s.add_argument("--branch", default="main")
     s.set_defaults(func=cmd_clone)
+
+    repo_cmd = sub.add_parser("repo", help="Manage remote repos")
+    repo_sub = repo_cmd.add_subparsers(dest="repo_cmd", required=True)
+
+    r = repo_sub.add_parser("create", help="Create/init a repo on the remote (gaithubd)")
+    r.add_argument("remote", nargs="?", default="origin")
+    r.add_argument("--owner", required=True)
+    r.add_argument("--repo", required=True)
+    r.set_defaults(func=cmd_repo_create)
 
     s = sub.add_parser("verify", help="Verify refs + objects integrity")
     s.set_defaults(func=cmd_verify)
