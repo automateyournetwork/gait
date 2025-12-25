@@ -524,10 +524,30 @@ def cmd_chat(args: argparse.Namespace) -> int:
     # ----------------------------
     # Refresh locals AFTER detection/forcing
     # ----------------------------
-    provider = (args.provider or "ollama").strip()
+    provider = (args.provider or "ollama").strip().lower()
     host = args.host
     base_url = args.base_url
     api_key = args.api_key
+
+    # ----------------------------
+    # OpenAI Cloud defaults
+    # ----------------------------
+    if provider == "chatgpt":
+        # default endpoint if user didn't provide one
+        if not base_url:
+            base_url = "https://api.openai.com/v1"
+
+        # prefer OPENAI_API_KEY for cloud
+        if not api_key:
+            api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+
+        if not api_key:
+            raise RuntimeError(
+                "OPENAI_API_KEY is not set (required for provider=openai).\n"
+                "Example:\n"
+                "  export OPENAI_API_KEY='sk-...'\n"
+                "  gait chat --provider openai --model gpt-4.1-mini"
+            )
 
     # Model precedence:
     # 1) --model
@@ -547,7 +567,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
             model = "llama3.1" if "llama3.1" in models else models[0]
             print(f"[gait] no --model provided; using: {model}")
 
-    elif provider == "openai_compat":
+    elif provider in ("openai_compat", "chatgpt"):
         if not base_url:
             raise RuntimeError("openai_compat requires --base-url (or auto-detection).")
 
@@ -555,6 +575,11 @@ def cmd_chat(args: argparse.Namespace) -> int:
         if not model and default_model:
             model = default_model
             print(f"[gait] using default model from GAIT_DEFAULT_MODEL: {model}")
+
+        # For OpenAI cloud, pick a sensible fallback if still not set
+        if provider == "chatgpt" and not model:
+            model = "gpt-5.1"
+            print(f"[gait] no --model provided; using: {model}")
 
         if not model:
             raise RuntimeError(
@@ -1245,7 +1270,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument(
         "--provider",
         default=os.environ.get("GAIT_PROVIDER", ""),
-        choices=["", "ollama", "openai_compat"],
+        choices=["", "ollama", "openai_compat", "chatgpt", "chatGPT"],
         help=(
             "LLM provider backend.\n"
             "If omitted, GAIT auto-detects local providers by port.\n"
@@ -1270,7 +1295,7 @@ def build_parser() -> argparse.ArgumentParser:
     
     chat.add_argument(
         "--api-key",
-        default=os.environ.get("GAIT_API_KEY", ""),
+        default=os.environ.get("GAIT_API_KEY", os.environ.get("OPENAI_API_KEY", "")),
         help="API key for OpenAI-compatible servers (often blank for local)"
     )
     
