@@ -25,6 +25,7 @@ from .llm import (
     ollama_list_models, ollama_chat,
     openai_compat_list_models, openai_compat_chat,
     gemini_list_models, gemini_chat,
+    anthropic_list_models, anthropic_chat,
 )
 
 def _resolve_commitish(repo: GaitRepo, commitish: str | None) -> str:
@@ -480,7 +481,6 @@ def cmd_chat(args: argparse.Namespace) -> int:
             return {
                 "provider": "openai_compat",
                 "base_url": "http://127.0.0.1:63545",
-                # Foundry wants full model ID
                 "model": os.environ.get(
                     "GAIT_FOUNDRY_MODEL",
                     "DeepSeek-R1-Distill-Qwen-1.5B-trtrtx-gpu:1",
@@ -489,12 +489,18 @@ def cmd_chat(args: argparse.Namespace) -> int:
 
         # 3) LM Studio
         if port_open("127.0.0.1", 1234):
-            return {
-                "provider": "openai_compat",
-                "base_url": "http://127.0.0.1:1234",
-            }
+            return {"provider": "openai_compat", "base_url": "http://127.0.0.1:1234"}
+
+        # 4) Cloud fallback (no local ports open)
+        if os.environ.get("OPENAI_API_KEY", "").strip():
+            return {"provider": "chatgpt"}
+        if (os.environ.get("GEMINI_API_KEY", "").strip() or os.environ.get("GOOGLE_API_KEY", "").strip()):
+            return {"provider": "gemini"}
+        if os.environ.get("ANTHROPIC_API_KEY", "").strip():
+            return {"provider": "claude"}
 
         return None
+
 
     # ----------------------------
     # Decide provider + endpoint
@@ -509,10 +515,15 @@ def cmd_chat(args: argparse.Namespace) -> int:
         d = auto_detect()
         if not d:
             raise RuntimeError(
-                "No local LLM found.\n"
+                "No local LLM found and no cloud API keys detected.\n"
                 "- Ollama: 127.0.0.1:11434\n"
                 "- Foundry Local: 127.0.0.1:63545\n"
-                "- LM Studio: 127.0.0.1:1234"
+                "- LM Studio: 127.0.0.1:1234\n"
+                "Or set one of:\n"
+                "- OPENAI_API_KEY (provider=chatgpt)\n"
+                "- GEMINI_API_KEY / GOOGLE_API_KEY (provider=gemini)\n"
+                "- ANTHROPIC_API_KEY (provider=claude)\n"
+                "Or pass: gait chat --provider <ollama|openai_compat|chatgpt|gemini|claude>"
             )
         args.provider = d["provider"]
         args.host = d.get("host", args.host)
@@ -618,6 +629,10 @@ def cmd_chat(args: argparse.Namespace) -> int:
             model = "gemini-3-pro-preview"
             print(f"[gait] no --model provided; using: {model}")
 
+    elif provider in ("claude", "anthropic"):
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is required for provider=claude")
 
     else:
         raise RuntimeError(f"Unknown provider: {provider!r}")
@@ -697,7 +712,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
         p = (new_provider or "").strip().lower()
         if p == "chatgpt":  # normalize typo
             p = "chatgpt"
-        if p not in ("ollama", "openai_compat", "chatgpt", "gemini"):
+        if p not in ("ollama", "openai_compat", "chatgpt", "gemini", "claude", "anthropic"):
             print(f"[gait] unknown provider: {p!r}")
             return
     
@@ -736,7 +751,21 @@ def cmd_chat(args: argparse.Namespace) -> int:
                 raise RuntimeError("OPENAI_API_KEY is not set (required for provider=chatgpt).")
     
             model = new_model or (os.environ.get("GAIT_DEFAULT_MODEL", "").strip() or "gpt-5.1")
-    
+
+        elif provider in ("claude", "anthropic"):
+            base_url = ""          # not used
+            where = "api.anthropic.com/v1"
+
+            # HARD rebind — do NOT reuse previous api_key
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+            if not api_key:
+                raise RuntimeError("ANTHROPIC_API_KEY is required for provider=claude")
+
+            model = new_model or (
+                os.environ.get("GAIT_DEFAULT_MODEL", "").strip()
+                or "claude-3-5-sonnet-latest"
+            )
+
         else:  # openai_compat
             where = base_url = (base_url or os.environ.get("GAIT_BASE_URL", "").strip())
             if not base_url:
@@ -1147,6 +1176,15 @@ def cmd_chat(args: argparse.Namespace) -> int:
                     max_tokens=args.num_predict,
                 )
 
+            elif provider in ("claude", "anthropic"):
+                assistant_text = anthropic_chat(
+                    model,
+                    messages,
+                    api_key=api_key,
+                    temperature=args.temperature,
+                    max_tokens=args.num_predict,
+                )
+
             else:
                 assistant_text = openai_compat_chat(
                     base_url,
@@ -1398,7 +1436,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument(
         "--provider",
         default=os.environ.get("GAIT_PROVIDER", ""),
-        choices=["", "ollama", "openai_compat", "chatgpt", "chatGPT", "gemini"],
+        choices=["", "ollama", "openai_compat", "chatgpt", "chatGPT", "gemini", "claude", "anthropic"],
         help=(
             "LLM provider backend.\n"
             "If omitted, GAIT auto-detects local providers by port.\n"

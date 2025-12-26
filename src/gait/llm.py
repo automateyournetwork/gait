@@ -277,3 +277,115 @@ def gemini_chat(
         # some errors come back with "promptFeedback" etc
         raise RuntimeError(f"Gemini returned empty text parts: {r}")
     return out
+
+# ============================
+# Claude / Anthropic provider (Messages API)
+# ============================
+
+def _anthropic_api_key() -> str:
+    key = (os.environ.get("ANTHROPIC_API_KEY", "")).strip()
+    if not key:
+        raise RuntimeError("Missing Anthropic API key. Set ANTHROPIC_API_KEY.")
+    return key
+
+
+def anthropic_list_models(api_key: str = "", *, base_url: str = "https://api.anthropic.com") -> list[str]:
+    api_key = (api_key or "").strip() or _anthropic_api_key()
+    b = base_url.rstrip("/")
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+    }
+    r = _http_json(f"{b}/v1/models", method="GET", headers=headers, timeout=30.0)
+
+    out: list[str] = []
+    for item in (r.get("data") or []):
+        mid = item.get("id")
+        if mid:
+            out.append(mid)
+    return out
+
+
+def anthropic_chat(
+    model: str,
+    messages: list[dict],
+    *,
+    api_key: str = "",
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+    base_url: str = "https://api.anthropic.com",
+    debug: bool = False,
+) -> str:
+    """
+    Maps GAIT messages -> Anthropic Messages API.
+    - GAIT system messages => joined into a single `system` string.
+    - user/assistant => `messages` with roles user/assistant
+    """
+    api_key = (api_key or "").strip() or _anthropic_api_key()
+
+    model_id = (model or "").strip()
+    if not model_id:
+        raise RuntimeError("anthropic_chat: model is required.")
+
+    # Collect system text
+    sys_chunks: list[str] = []
+    amsgs: list[dict] = []
+
+    for m in messages:
+        role = (m.get("role") or "").strip()
+        text = m.get("content")
+        if not isinstance(text, str):
+            continue
+        text = text.strip()
+        if not text:
+            continue
+
+        if role == "system":
+            sys_chunks.append(text)
+            continue
+
+        if role not in ("user", "assistant"):
+            # ignore unknown roles
+            continue
+
+        amsgs.append({"role": role, "content": text})
+
+    payload: Dict[str, Any] = {
+        "model": model_id,
+        "messages": amsgs,
+        # Anthropic requires max_tokens; choose a safe default if user didn't set one.
+        "max_tokens": int(max_tokens) if max_tokens is not None else 1024,
+    }
+
+    if sys_chunks:
+        payload["system"] = "\n\n".join(sys_chunks)
+
+    if temperature is not None:
+        payload["temperature"] = float(temperature)
+
+    b = base_url.rstrip("/")
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+    }
+
+    r = _http_json(f"{b}/v1/messages", method="POST", payload=payload, headers=headers, timeout=600.0)
+
+    if debug:
+        sr = r.get("stop_reason")
+        if sr:
+            print(f"[gait] anthropic stop_reason={sr}")
+
+    # Response content is an array of blocks; collect text blocks.
+    blocks = r.get("content") or []
+    texts: list[str] = []
+    for b in blocks:
+        if isinstance(b, dict) and b.get("type") == "text":
+            t = b.get("text")
+            if isinstance(t, str) and t:
+                texts.append(t)
+
+    out = "".join(texts).strip()
+    if not out:
+        raise RuntimeError(f"Anthropic returned empty text blocks: {r}")
+    return out
