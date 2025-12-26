@@ -8,8 +8,6 @@ from typing import Optional
 
 from pathlib import Path
 
-from regex import sub
-
 from .repo import GaitRepo
 from .schema import Turn
 from .objects import short_oid
@@ -530,13 +528,26 @@ def cmd_chat(args: argparse.Namespace) -> int:
     base_url = args.base_url
     api_key = args.api_key
 
+    # ---- Provider-specific credential rebinding (startup) ----
+    if provider == "gemini":
+        api_key = (
+            os.environ.get("GEMINI_API_KEY", "")
+            or os.environ.get("GOOGLE_API_KEY", "")
+            or ""
+        ).strip()
+        if not api_key:
+            raise RuntimeError("GEMINI_API_KEY or GOOGLE_API_KEY is required for provider=gemini")
+
+    elif provider == "chatgpt":
+        api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY is required for provider=chatgpt")
+
     # ----------------------------
-    # OpenAI Cloud defaults
+    # Provider defaults (endpoints)
     # ----------------------------
-    if provider == "chatgpt":
-        # default endpoint if user didn't provide one
-        if not base_url:
-            base_url = "https://api.openai.com/v1"
+    if provider == "chatgpt" and not base_url:
+        base_url = "https://api.openai.com/v1"
 
         # prefer OPENAI_API_KEY for cloud
         if not api_key:
@@ -618,7 +629,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
     else:
         where = base_url
     print(f"[gait] repo={repo.root} branch={repo.current_branch()} provider={provider} model={model} endpoint={where}")
-    print("[gait] commands: /models /model NAME /branches /branch NAME /checkout NAME /merge BRANCH [--with-memory] /delete BRANCH /pin /revert [/revert COMMIT] /memory /exit")
+    print("[gait] commands: /models /model NAME /provider NAME [MODEL] /branches ...")
     print()
 
     # ----------------------------
@@ -680,6 +691,69 @@ def cmd_chat(args: argparse.Namespace) -> int:
         base_url = remote_get(repo, remote_name)
         return RemoteSpec(base_url=base_url, owner=owner, repo=repo_name, name=remote_name)
 
+    def _apply_provider_switch(new_provider: str, new_model: str | None = None) -> None:
+        nonlocal provider, host, base_url, api_key, model, messages, where
+    
+        p = (new_provider or "").strip().lower()
+        if p == "chatgpt":  # normalize typo
+            p = "chatgpt"
+        if p not in ("ollama", "openai_compat", "chatgpt", "gemini"):
+            print(f"[gait] unknown provider: {p!r}")
+            return
+    
+        provider = p
+    
+        if provider == "ollama":
+            api_key = ""          # not used
+            base_url = ""         # not used
+            host = host or os.environ.get("OLLAMA_HOST", "127.0.0.1:11434")
+            where = host
+            if new_model:
+                model = new_model
+            else:
+                ms = ollama_list_models(host)
+                if not ms:
+                    raise RuntimeError("No Ollama models found. Try: ollama pull llama3.1")
+                model = "llama3.1" if "llama3.1" in ms else ms[0]
+    
+        elif provider == "gemini":
+            base_url = ""         # not used
+            where = "google-genai"
+            api_key = (
+                os.environ.get("GEMINI_API_KEY", "").strip()
+                or os.environ.get("GOOGLE_API_KEY", "").strip()
+            )
+            if not api_key:
+                raise RuntimeError("GEMINI_API_KEY or GOOGLE_API_KEY is required for provider=gemini")
+    
+            model = new_model or (os.environ.get("GAIT_DEFAULT_MODEL", "").strip() or "gemini-3-pro-preview")
+    
+        elif provider == "chatgpt":
+            where = "https://api.openai.com/v1"
+            base_url = where
+            api_key = os.environ.get("OPENAI_API_KEY", "").strip()  # HARD override
+            if not api_key:
+                raise RuntimeError("OPENAI_API_KEY is not set (required for provider=chatgpt).")
+    
+            model = new_model or (os.environ.get("GAIT_DEFAULT_MODEL", "").strip() or "gpt-5.1")
+    
+        else:  # openai_compat
+            where = base_url = (base_url or os.environ.get("GAIT_BASE_URL", "").strip())
+            if not base_url:
+                raise RuntimeError("openai_compat requires --base-url (or GAIT_BASE_URL).")
+    
+            # for local servers this is often blank, but if provided:
+            api_key = (os.environ.get("GAIT_API_KEY", "").strip() or "")
+    
+            model = new_model or os.environ.get("GAIT_DEFAULT_MODEL", "").strip()
+            if not model:
+                raise RuntimeError("No model specified for openai_compat.")
+    
+        messages = build_messages_for_current_branch()
+        print(f"[gait] provider set to: {provider}")
+        print(f"[gait] model set to: {model}")
+        print(f"[gait] endpoint: {where}")
+
     # ----------------------------
     # Interactive loop
     # ----------------------------
@@ -716,8 +790,9 @@ def cmd_chat(args: argparse.Namespace) -> int:
                 print("[gait] usage: /branch <name>")
                 continue
             try:
-                repo.create_branch(name, from_commit=None, inherit_memory=True)
-                print(f"[gait] created branch: {name}")
+                start = repo.head_commit_id()  # Git-like: branch from current HEAD
+                repo.create_branch(name, from_commit=start, inherit_memory=True)
+                print(f"[gait] created branch: {name} -> {(start or '(empty)')[:8]}")
             except Exception as e:
                 print(f"[gait] branch error: {e}")
             continue
@@ -735,6 +810,17 @@ def cmd_chat(args: argparse.Namespace) -> int:
                 print(f"[gait] HEAD: {repo.head_commit_id() or '(empty)'}")
             except Exception as e:
                 print(f"[gait] checkout error: {e}")
+            continue
+
+        if user_text.startswith("/provider "):
+            parts = user_text.split(maxsplit=2)
+            # /provider <name> [model]
+            newp = parts[1].strip() if len(parts) >= 2 else ""
+            newm = parts[2].strip() if len(parts) == 3 else None
+            try:
+                _apply_provider_switch(newp, newm)
+            except Exception as e:
+                print(f"[gait] provider error: {e}")
             continue
 
         if user_text == "/models":
@@ -1337,7 +1423,7 @@ def build_parser() -> argparse.ArgumentParser:
     
     chat.add_argument(
         "--api-key",
-        default=os.environ.get("GAIT_API_KEY", os.environ.get("OPENAI_API_KEY", "")),
+        default=os.environ.get("GAIT_API_KEY", ""),
         help="API key for OpenAI-compatible servers (often blank for local)"
     )
     
