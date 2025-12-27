@@ -52,7 +52,7 @@ A local LLM framework running: Ollama, LM Studio, or Microsoft Foundry Local.
 
 ``` Bash
 
-git clone https://github.com/your-username/gait.git
+git clone https://github.com/automateyournetwork/gait.git
 cd gait
 pip install gait-ai
 
