@@ -245,6 +245,207 @@ class GaitRepo:
         turns_newest_first.reverse()
         return turns_newest_first
 
+    def iter_commit_ids_from_head_first_parent(
+        self,
+        *,
+        start_commit: Optional[str] = None,
+        limit_commits: int = 200,
+    ) -> List[str]:
+        """
+        Walk commits backward from start_commit (default HEAD) following first-parent only.
+        Returns commit ids newest->oldest.
+        """
+        cid = start_commit or self.head_commit_id()
+        if not cid:
+            return []
+
+        out: List[str] = []
+        seen = set()
+
+        while cid and cid not in seen and len(out) < limit_commits:
+            seen.add(cid)
+            out.append(cid)
+            c = self.get_commit(cid)
+            parents = c.get("parents") or []
+            cid = parents[0] if parents else ""
+
+        return out
+
+    def _make_backup_ref(self, *, branch: str, head_commit: str, reason: str) -> str:
+        """
+        Write a backup ref under .gait/refs/backup/<branch>/<timestamp>.
+        Returns the backup ref path (string).
+        """
+        import datetime
+
+        ts = datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat().replace(":", "").replace("-", "")
+        backup_dir = self.gait_dir / "refs" / "backup" / branch
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        name = f"{ts}-{reason}"
+        p = backup_dir / name
+        p.write_text(head_commit + "\n", encoding="utf-8")
+        return str(p.relative_to(self.gait_dir))
+
+    def summarize_and_squash(
+        self,
+        *,
+        last: int = 10,
+        message: str = "",
+        mode: str = "soft",
+        include_merges: bool = False,
+        max_chars_per_side: int = 20000,
+    ) -> Dict[str, Any]:
+        """
+        Squash the last N turn-commits into one commit.
+        - mode="soft": creates a backup ref to old HEAD
+        - mode="hard": no backup ref (still no object deletion; just no easy ref)
+        Returns details dict.
+        """
+        mode = (mode or "soft").strip().lower()
+        if mode not in ("soft", "hard"):
+            raise ValueError("mode must be 'soft' or 'hard'")
+
+        if last < 1:
+            raise ValueError("last must be >= 1")
+
+        branch = self.current_branch()
+        old_head = self.head_commit_id()
+        if not old_head:
+            raise ValueError("Nothing to squash (branch has no commits).")
+
+        # Walk history newest->oldest
+        commit_ids = self.iter_commit_ids_from_head_first_parent(start_commit=old_head, limit_commits=500)
+
+        # Pick commits that actually contain turns
+        picked: List[str] = []
+        for cid in commit_ids:
+            c = self.get_commit(cid)
+            kind = (c.get("kind") or "").strip().lower()
+            has_turns = bool(c.get("turn_ids") or [])
+
+            if not include_merges and kind == "merge":
+                continue
+
+            if has_turns:
+                picked.append(cid)
+                if len(picked) >= last:
+                    break
+
+        if not picked:
+            raise ValueError("No commits with turns found to squash.")
+
+        # Oldest commit is last in picked (because picked is newest->oldest)
+        oldest = picked[-1]
+        oldest_commit = self.get_commit(oldest)
+        oldest_parents = oldest_commit.get("parents") or []
+        base_parent = oldest_parents[0] if oldest_parents else ""
+
+        # Collect turns in chronological order oldest->newest
+        # Each commit may contain multiple turns; preserve commit order.
+        picked_oldest_to_newest = list(reversed(picked))
+        turns: List[Dict[str, Any]] = []
+        for cid in picked_oldest_to_newest:
+            c = self.get_commit(cid)
+            for tid in (c.get("turn_ids") or []):
+                turns.append(self.get_turn(tid))
+
+        if not turns:
+            raise ValueError("Picked commits had no turns (unexpected).")
+
+        # Build a deterministic "context compressed" summary
+        def clip(s: str) -> str:
+            s = (s or "").strip()
+            if len(s) <= max_chars_per_side:
+                return s
+            return s[: max_chars_per_side - 200] + "\n...[truncated]..."
+
+        user_lines: List[str] = []
+        assistant_lines: List[str] = []
+        for i, t in enumerate(turns, start=1):
+            u = (t.get("user") or {}).get("text", "").strip()
+            a = (t.get("assistant") or {}).get("text", "").strip()
+            if u:
+                user_lines.append(f"{i}. {u}")
+            if a:
+                assistant_lines.append(f"{i}. {a}")
+
+        user_blob = clip("\n".join(user_lines))
+        assistant_blob = clip("\n".join(assistant_lines))
+
+        user_text = (
+            "GAIT Context Compression (Squash)\n"
+            f"branch: {branch}\n"
+            f"squashed_commits: {len(picked)}\n\n"
+            "User (compressed):\n"
+            f"{user_blob}"
+        )
+
+        assistant_text = (
+            "Assistant (compressed):\n"
+            f"{assistant_blob}\n\n"
+            "Notes:\n"
+            "- This is a deterministic squash summary (no LLM). "
+            "Later we can add an optional --provider/--model summarizer.\n"
+        )
+
+        # Create a new summary turn
+        summary_turn = Turn.v0(
+            user_text=user_text,
+            assistant_text=assistant_text,
+            context={"op": "summarize_and_squash", "mode": mode, "branch": branch},
+            tools={},
+            model={},
+            visibility="private",
+        )
+
+        summary_turn_id = store_object(self.objects_dir, summary_turn.to_dict())
+
+        # Create squash commit (parent = base_parent)
+        parents: List[str] = [base_parent] if base_parent else []
+        squash_meta = {
+            "mode": mode,
+            "branch": branch,
+            "old_head": old_head,
+            "base_parent": base_parent,
+            "squashed_commits": picked_oldest_to_newest,
+            "turns_squashed": len(turns),
+        }
+
+        squash_commit = Commit.v0(
+            parents=parents,
+            turn_ids=[summary_turn_id],
+            branch=branch,
+            snapshot_id=None,
+            kind="squash",
+            message=message or f"squash last {len(picked)} turn-commit(s)",
+            meta=squash_meta,
+        )
+        squash_commit_id = store_object(self.objects_dir, squash_commit.to_dict())
+
+        # Backup ref (soft mode)
+        backup_ref = ""
+        if mode == "soft":
+            backup_ref = self._make_backup_ref(branch=branch, head_commit=old_head, reason="pre-squash")
+
+        # Move branch HEAD to new squash commit
+        self.write_ref(branch, squash_commit_id)
+
+        # Log the summary turn like normal
+        self.append_turn_log(summary_turn_id, squash_commit_id)
+
+        return {
+            "ok": True,
+            "branch": branch,
+            "mode": mode,
+            "old_head": old_head,
+            "new_head": squash_commit_id,
+            "backup_ref": backup_ref,
+            "squashed_commits": picked_oldest_to_newest,
+            "base_parent": base_parent,
+            "turns_squashed": len(turns),
+            "summary_turn_id": summary_turn_id,
+        }
+
     # ----------------------------
     # Branch ops
     # ----------------------------
