@@ -279,6 +279,25 @@ def cmd_revert(args: argparse.Namespace) -> int:
 
     return 0
 
+def cmd_summarize_and_squash(args: argparse.Namespace) -> int:
+    repo = GaitRepo.discover()
+
+    r = repo.summarize_and_squash(
+        last=args.last,
+        message=args.message or "",
+        mode=args.mode,
+        include_merges=args.include_merges,
+    )
+
+    print(f"squashed: {len(r['squashed_commits'])} commit(s) -> 1")
+    print(f"branch:   {r['branch']}")
+    print(f"mode:     {r['mode']}")
+    print(f"old HEAD: {r['old_head']}")
+    print(f"new HEAD: {r['new_head']}")
+    if r.get("backup_ref"):
+        print(f"backup:   {r['backup_ref']}")
+    return 0
+
 
 def cmd_record_turn(args: argparse.Namespace) -> int:
     repo = GaitRepo.discover()
@@ -942,6 +961,31 @@ def cmd_chat(args: argparse.Namespace) -> int:
         if user_text in ("/undo",):
             user_text = "/revert"
 
+        if user_text.startswith("/squash"):
+            parts = user_text.split()
+            last = 10
+            mode = "soft"
+            if len(parts) >= 2:
+                try:
+                    last = int(parts[1])
+                except Exception:
+                    print("[gait] usage: /squash [last_int] [soft|hard]")
+                    continue
+            if len(parts) >= 3:
+                mode = parts[2].strip().lower()
+            try:
+                r = repo.summarize_and_squash(last=last, mode=mode, message="chat squash")
+                print(f"[gait] squashed {len(r['squashed_commits'])} -> 1")
+                print(f"[gait] new HEAD: {short_oid(r['new_head'])}")
+                if r.get("backup_ref"):
+                    print(f"[gait] backup: {r['backup_ref']}")
+                # After history rewrite, rebuild messages (resume now sees new history)
+                messages = build_messages_for_current_branch()
+            except Exception as e:
+                print(f"[gait] squash error: {e}")
+            continue
+
+
         if user_text == "/pin":
             head = repo.head_commit_id()
             if not head:
@@ -1311,6 +1355,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--also-memory", action="store_true",
                    help="Also rewind HEAD+ memory via memory reflog")
     s.set_defaults(func=cmd_revert)
+
+    s = sub.add_parser("summarize-and-squash", help="Squash the last N turn-commits into one summary commit")
+    s.add_argument("--last", type=int, default=10, help="How many turn-commits to squash (default: 10)")
+    s.add_argument("--mode", default="soft", choices=["soft", "hard"], help="soft writes a backup ref (default: soft)")
+    s.add_argument("--message", default="", help="Optional commit message for the squash commit")
+    s.add_argument("--include-merges", action="store_true", help="Include merge commits if they have turns (rare)")
+    s.set_defaults(func=cmd_summarize_and_squash)
 
     # ----------------------------
     # Chat (local LLM)
